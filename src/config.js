@@ -34,7 +34,11 @@ module.exports = {
   upstreamModel: process.env.UPSTREAM_MODEL || 'moonshotai/kimi-k3.1-pro',
   publicModelIds,
   triggerText: process.env.TRIGGER_TEXT || 'continuar',
-  maxTokens: readInt('MAX_TOKENS', 65536, { min: 256, max: 131072 }),
+  maxTokens: readInt('MAX_TOKENS', 0, { min: 0 }),
+  autoContinue: readBool('AUTO_CONTINUE', true),
+  maxContinuations: readInt('MAX_CONTINUATIONS', 12, { min: 0, max: 100 }),
+  continuePrompt: process.env.CONTINUE_PROMPT
+    || 'Continue exactly where your previous message stopped. Do not repeat anything you already wrote. Output only the remaining content.',
   reasoningEffort: process.env.REASONING_EFFORT || 'low',
   conciseResponses: readBool('CONCISE_RESPONSES', true),
   firstByteTimeoutMs: readInt('FIRST_BYTE_TIMEOUT_MS', 90000, { min: 10000 }),

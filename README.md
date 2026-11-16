@@ -22,9 +22,8 @@ NVIDIA currently offers free access to **Kimi K3** exclusively through its web P
 * **Two independent browser tabs:** Allows concurrent requests with queuing, retries, graceful aborts, and automatic browser recovery.
 * **OpenAI-compatible API:** Works out of the box with OpenCode and any OpenAI-compatible chat-completion client.
 * **Optional Obsidian memory:** Stores project conversations, decisions, preferences, and next steps as linked Markdown notes.
-* **Concise by default:** Prioritizes precise, direct answers and verified coding actions without truncating requested files.
-- 
-
+* **No output-token limit:** When Kimi reaches the playground's per-turn cap, the bridge automatically asks it to continue and concatenates the output, so long files and answers are not truncated.
+* **Complete responses by default:** Prioritizes precise, direct answers and verified coding actions without cutting off requested content.
 
 ## How it works
 
@@ -119,7 +118,11 @@ Add the following to your existing `~/.config/opencode/opencode.json` (macOS/Lin
       },
       "models": {
         "moonshotai/kimi-k3_1-pro": {
-          "name": "Kimi K3.1 Pro (Bridge)"
+          "name": "Kimi K3.1 Pro (Bridge)",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
         }
       }
     }
@@ -148,6 +151,10 @@ For current OpenCode versions using the newer provider format, the equivalent is
             "tools": true,
             "input": ["text"],
             "output": ["text"]
+          },
+          "limit": {
+            "context": 1048576,
+            "output": 65536
           }
         }
       }
@@ -155,6 +162,8 @@ For current OpenCode versions using the newer provider format, the equivalent is
   }
 }
 ```
+
+OpenCode assumes a 32,000-token output limit for models it does not recognize. The `limit` blocks above declare the model's 1M-token context and a 65,536-token output so OpenCode does not impose a smaller cap. If the playground still stops earlier, the bridge continues automatically as described in [Unlimited output](#unlimited-output).
 
 Then run a command inside the project you want the agent to work on:
 
@@ -203,11 +212,21 @@ Which package manager do I prefer?
 
 Session histories store messages and tool names, targets, and statuses—not complete shell output. Durable notes are Markdown with `[[wiki links]]`; you can edit or create them manually. The vault is local and ignored by Git. It is **not encrypted**: never store credentials, cookies, tokens, or secrets. See [memory/README.md](memory/README.md) for details.
 
-The bridge instructs Kimi to answer in the user's language, stay precise and concise, and verify coding actions. Requested files and code are never intentionally truncated. Set `CONCISE_RESPONSES=false` to disable this instruction.
+The bridge instructs Kimi to answer in the user's language, stay precise, and verify coding actions, while preferring complete answers over brevity. Requested files and code are never intentionally truncated. Set `CONCISE_RESPONSES=false` to disable this instruction.
 
 ### Tool safety
 
 File creation, edits, shell commands, and application launches are performed by **OpenCode on your computer**, not by the remote model itself. Review proposed commands and configure OpenCode's permissions appropriately. An instruction such as "delete files" or "install a package" may have real effects; the bridge is not a sandbox. This project does not provide unrestricted desktop/GUI control.
+
+## Unlimited output
+
+The playground applies a per-generation output cap (currently 65536 tokens), and NIM defaults to ~1024 when the field is missing, so the bridge always sends a per-call value. It treats that cap as a checkpoint, not a limit:
+
+- `MAX_TOKENS=0` (the default) adds no bridge-imposed ceiling: each call uses 65536 tokens and client `max_tokens` / `max_completion_tokens` values are forwarded unchanged. Set `MAX_TOKENS` to a positive number only if you want a hard ceiling.
+- When a generation finishes because of the cap (`finish_reason: "length"`), the bridge automatically sends a continuation turn with the partial answer and appends the new content to the same response. Streaming clients receive a single uninterrupted stream with one final `finish_reason`.
+- Continuations repeat up to `MAX_CONTINUATIONS` times (default 12). If all of them are consumed, the final `finish_reason` is `length` so the client can tell the answer is incomplete.
+- Set `AUTO_CONTINUE=false` to disable automatic continuation.
+- Streams that drop without a finish event are also treated as incomplete and continued instead of being returned cut off.
 
 ## Configuration
 
@@ -227,9 +246,12 @@ REASONING_EFFORT=high WORKERS=2 npm start
 | `PLAYGROUND_URL` | Kimi playground URL | Playground page to automate. |
 | `MODEL_ID` | `moonshotai/kimi-k3_1-pro` | Primary model ID advertised to clients. The dotted alias is also listed. |
 | `UPSTREAM_MODEL` | `moonshotai/kimi-k3.1-pro` | Model ID sent to the playground API. |
-| `MAX_TOKENS` | `65536` | Output-token limit, clamped to 256–131072 in configuration. The playground UI currently advertises 65536; actual upstream limits may change. |
+| `MAX_TOKENS` | `0` | Optional hard output cap per upstream call. `0` means no bridge limit: calls use 65536 tokens and client values are forwarded unchanged. The bridge auto-continues past the cap, so output is effectively unlimited. |
+| `AUTO_CONTINUE` | `true` | When Kimi hits the per-turn cap, ask it to continue and merge the output into one response. |
+| `MAX_CONTINUATIONS` | `12` | Maximum automatic continuation turns per request, `0`–`100`. |
+| `CONTINUE_PROMPT` | built-in text | Prompt sent to Kimi on each continuation turn. |
 | `REASONING_EFFORT` | `low` | Default `low`, `medium`, `high`, or `max`; clients can override it. |
-| `CONCISE_RESPONSES` | `true` | Add instructions for short, precise answers and verified coding actions. |
+| `CONCISE_RESPONSES` | `true` | Add instructions for precise answers and verified coding actions while never truncating requested content. |
 | `KIMI_MEMORY_DIR` | `<project>/memory` | Optional custom Obsidian vault location for the OpenCode process. |
 | `KIMI_MEMORY_RETRIEVE` | `true` | Set to `false` to disable automatic note retrieval; memory tools remain available. |
 | `TRIGGER_TEXT` | `continuar` | Placeholder UI text; the bridge replaces the request body with your messages. |
@@ -315,7 +337,7 @@ src/memory.js        Obsidian-compatible memory storage and retrieval
 .opencode/plugins/   OpenCode integration
 scripts/             Optional global/project memory setup
 memory/templates/    Public note templates; personal notes stay local
-test/                Memory persistence and retrieval tests
+test/                Unit tests for token policy, streaming relay, and memory
 ```
 
 ## Security and responsible use

@@ -3,7 +3,16 @@
 const express = require('express');
 const config = require('./src/config');
 const { PlaygroundBridge } = require('./src/playground');
-const { buildUpstreamBody, toChatCompletion, errorPayload, HttpError } = require('./src/openai');
+const { SseRelay } = require('./src/sse');
+const {
+  buildContinuationBody,
+  buildUpstreamBody,
+  mergeUsage,
+  toChatCompletion,
+  toChatCompletionChunk,
+  errorPayload,
+  HttpError,
+} = require('./src/openai');
 
 function createLogger(debug) {
   const stamp = () => new Date().toISOString().slice(11, 19);
@@ -124,7 +133,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   const wantsStream = clientBody.stream === true;
   logger.info(
-    `[${id}] start model=${prepared.requestedModel} messages=${prepared.meta.messages} tools=${prepared.meta.tools} stream=${wantsStream}`,
+    `[${id}] start model=${prepared.requestedModel} messages=${prepared.meta.messages} tools=${prepared.meta.tools} stream=${wantsStream} maxTokens=${prepared.meta.maxTokens ?? 'unlimited'}`,
   );
   if (prepared.meta.clamped) {
     logger.debug(`[${id}] max_tokens clamped to ${prepared.meta.maxTokens}`);
@@ -205,47 +214,97 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (headersTimer.unref) headersTimer.unref();
   }
 
-  let lastError = null;
-  let accumulator = null;
+  const relay = wantsStream ? new SseRelay(chunk => safeWrite(chunk)) : null;
+  const onRaw = chunk => {
+    if (closed || !wantsStream) return;
+    if (!streamStarted) {
+      streamStarted = true;
+      startSse();
+    }
+    relay.push(chunk);
+  };
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    if (closed) break;
-    try {
-      worker = await bridge.acquire(config.queueTimeoutMs);
-    } catch (error) {
-      lastError = error;
-      worker = null;
-      break;
-    }
-    if (closed) {
-      bridge.release(worker);
-      worker = null;
-      break;
-    }
-    try {
-      accumulator = await worker.execute(prepared.body, {
-        onRaw: chunk => {
-          if (closed || !wantsStream) return;
-          if (!streamStarted) {
-            streamStarted = true;
-            startSse();
-          }
-          safeWrite(chunk);
-        },
-      });
-      break;
-    } catch (error) {
-      lastError = error;
-      accumulator = null;
-      logger.warn(`[${id}] attempt ${attempt} failed: ${error.message}`);
-      if (attempt === 1 && !streamStarted && !closed) {
-        continue;
+  const DEFAULT_UPSTREAM_MAX_TOKENS = 65536;
+  let fallbackBody = prepared.body.max_tokens > DEFAULT_UPSTREAM_MAX_TOKENS
+    ? { ...prepared.body, max_tokens: DEFAULT_UPSTREAM_MAX_TOKENS }
+    : null;
+  const isMaxTokensError = error => {
+    const message = String((error && error.message) || '');
+    return /HTTP 400/i.test(message)
+      && /max_tokens|max_completion_tokens|maximum context|context length|token limit|too many tokens/i.test(message);
+  };
+
+  const executeTurn = async upstreamBody => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (closed) return { accumulator: null, error: null };
+      let turnWorker;
+      try {
+        turnWorker = await bridge.acquire(config.queueTimeoutMs);
+      } catch (error) {
+        return { accumulator: null, error };
       }
-      break;
-    } finally {
-      bridge.release(worker);
-      worker = null;
+      if (closed) {
+        bridge.release(turnWorker);
+        return { accumulator: null, error: null };
+      }
+      worker = turnWorker;
+      try {
+        const accumulator = await turnWorker.execute(upstreamBody, { onRaw });
+        return { accumulator, error: null };
+      } catch (error) {
+        lastError = error;
+        logger.warn(`[${id}] attempt ${attempt} failed: ${error.message}`);
+        if (attempt === 1 && !streamStarted && !closed) {
+          if (fallbackBody && isMaxTokensError(error)) {
+            logger.warn(`[${id}] retrying with max_tokens=${DEFAULT_UPSTREAM_MAX_TOKENS}`);
+            upstreamBody = fallbackBody;
+            prepared.body.max_tokens = DEFAULT_UPSTREAM_MAX_TOKENS;
+            fallbackBody = null;
+          }
+          continue;
+        }
+        return { accumulator: null, error: lastError };
+      } finally {
+        bridge.release(turnWorker);
+        if (worker === turnWorker) worker = null;
+      }
     }
+    return { accumulator: null, error: lastError };
+  };
+
+  let { accumulator, error: lastError } = await executeTurn(prepared.body);
+  let combinedContent = accumulator ? accumulator.aggregate.content : '';
+  let combinedReasoning = accumulator ? accumulator.aggregate.reasoning : '';
+  let combinedUsage = accumulator ? accumulator.aggregate.usage : null;
+  let finishReason = accumulator ? accumulator.getFinishReason() : null;
+  let continuations = 0;
+
+  while (
+    accumulator
+    && !closed
+    && !accumulator.error
+    && config.autoContinue
+    && config.maxContinuations > 0
+    && finishReason === 'length'
+    && accumulator.getToolCalls().length === 0
+    && continuations < config.maxContinuations
+  ) {
+    continuations += 1;
+    logger.info(`[${id}] continuation ${continuations}/${config.maxContinuations}: output limit reached, asking Kimi to continue`);
+    const continuationBody = buildContinuationBody(prepared.body, combinedContent, config);
+    const result = await executeTurn(continuationBody);
+    if (!result.accumulator) {
+      lastError = result.error || new HttpError(502, 'The continuation request failed', 'upstream_error');
+      accumulator = null;
+      break;
+    }
+    const next = result.accumulator;
+    combinedContent += next.aggregate.content;
+    combinedReasoning += next.aggregate.reasoning;
+    combinedUsage = mergeUsage(combinedUsage, next.aggregate.usage);
+    finishReason = next.getFinishReason();
+    accumulator = next;
   }
 
   cleanup();
@@ -257,6 +316,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       ? lastError
       : new HttpError(502, (lastError && lastError.message) || 'The bridge could not get a response from Kimi', 'upstream_error');
     if (wantsStream && headersSent) {
+      relay.flush();
       safeWrite(`data: ${JSON.stringify(errorPayload(error.message, error.type, error.code))}\n\n`);
       safeWrite('data: [DONE]\n\n');
       if (!closed && !res.writableEnded) res.end();
@@ -267,24 +327,29 @@ app.post('/v1/chat/completions', async (req, res) => {
     return;
   }
 
+  accumulator.aggregate.content = combinedContent;
+  accumulator.aggregate.reasoning = combinedReasoning;
+  accumulator.aggregate.usage = combinedUsage;
+  accumulator.aggregate.finishReason = finishReason;
+
   if (wantsStream) {
     startSse();
     if (closed) return;
+    relay.flush();
     if (accumulator.error) {
       safeWrite(`data: ${JSON.stringify(errorPayload(accumulator.error, 'upstream_error'))}\n\n`);
+    } else {
+      safeWrite(`data: ${JSON.stringify(toChatCompletionChunk(accumulator, prepared.requestedModel))}\n\n`);
     }
-    if (!accumulator.sawDone) {
-      safeWrite('data: [DONE]\n\n');
-    }
+    safeWrite('data: [DONE]\n\n');
     if (!closed && !res.writableEnded && !res.destroyed) res.end();
   } else {
     res.json(toChatCompletion(accumulator, prepared.requestedModel));
   }
 
-  const usage = accumulator.aggregate.usage;
   const toolCalls = accumulator.getToolCalls().length;
   logger.info(
-    `[${id}] done in ${Date.now() - startedAt}ms tokens=${usage ? usage.total_tokens : '?'} tools=${toolCalls} finish=${accumulator.getFinishReason()}`,
+    `[${id}] done in ${Date.now() - startedAt}ms tokens=${combinedUsage ? combinedUsage.total_tokens : '?'} tools=${toolCalls} finish=${finishReason} continuations=${continuations}`,
   );
 });
 

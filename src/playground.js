@@ -76,6 +76,8 @@ class PlaygroundWorker {
     this.needsReset = false;
     this.activeStreamId = null;
     this.ignoredStreams = new Set();
+    this.retiredStreams = new Set();
+    this.followedHasOutput = false;
     this.attachListeners();
   }
 
@@ -162,32 +164,91 @@ class PlaygroundWorker {
   }
 
   handleEvent(payload) {
-    const active = this.active;
-    if (!active || !payload) return;
+    if (!payload) return;
     const streamId = payload.id ? String(payload.id) : null;
-    if (payload.kind === 'start') {
-      if (!this.activeStreamId) {
-        this.activeStreamId = streamId;
-        this.logger.debug(`[worker ${this.id}] following stream ${streamId}`);
-        active.markStarted();
-      } else if (streamId && streamId !== this.activeStreamId) {
-        if (!this.ignoredStreams.has(streamId)) {
-          this.ignoredStreams.add(streamId);
-          this.logger.warn(`[worker ${this.id}] ignoring duplicate stream ${streamId} while following ${this.activeStreamId}`);
-        }
+    const active = this.active;
+    if (!active) {
+      if (streamId && payload.kind === 'start') {
+        this.retiredStreams.add(streamId);
+        if (this.retiredStreams.size > 500) this.retiredStreams.clear();
       }
       return;
     }
-    if (streamId && this.activeStreamId && streamId !== this.activeStreamId) return;
-    if (streamId && !this.activeStreamId) this.activeStreamId = streamId;
+    if (payload.kind === 'start') {
+      if (!streamId) return;
+      if (this.retiredStreams.has(streamId)) {
+        this.logger.debug(`[worker ${this.id}] ignoring retired stream ${streamId}`);
+        return;
+      }
+      if (!this.activeStreamId) {
+        this.activeStreamId = streamId;
+        this.followedHasOutput = false;
+        this.logger.debug(`[worker ${this.id}] following stream ${streamId}`);
+        active.markStarted();
+        return;
+      }
+      if (streamId === this.activeStreamId) return;
+      if (!this.followedHasOutput && !active.finished) {
+        this.logger.debug(`[worker ${this.id}] switching from silent stream ${this.activeStreamId} to ${streamId}`);
+        if (this.activeStreamId) this.retiredStreams.add(this.activeStreamId);
+        this.activeStreamId = streamId;
+        this.followedHasOutput = false;
+        return;
+      }
+      if (!this.ignoredStreams.has(streamId)) {
+        this.ignoredStreams.add(streamId);
+        this.logger.warn(`[worker ${this.id}] ignoring duplicate stream ${streamId} while following ${this.activeStreamId}`);
+      }
+      return;
+    }
     if (payload.kind === 'chunk') {
+      if (streamId && !this.activeStreamId) {
+        if (this.retiredStreams.has(streamId)) return;
+        this.activeStreamId = streamId;
+        this.followedHasOutput = false;
+        active.markStarted();
+      }
+      if (streamId && streamId !== this.activeStreamId) return;
+      this.followedHasOutput = true;
       this.lastHttpError = null;
       active.push(payload.text);
-    } else if (payload.kind === 'end') {
+      return;
+    }
+    if (payload.kind === 'end') {
+      if (streamId && streamId !== this.activeStreamId) {
+        this.ignoredStreams.delete(streamId);
+        return;
+      }
+      if (!this.followedHasOutput) {
+        const replacement = [...this.ignoredStreams].pop();
+        if (replacement) {
+          this.ignoredStreams.delete(replacement);
+          this.logger.debug(`[worker ${this.id}] moving to live stream ${replacement} after silent stream ${this.activeStreamId}`);
+          if (this.activeStreamId) this.retiredStreams.add(this.activeStreamId);
+          this.activeStreamId = replacement;
+          this.followedHasOutput = false;
+          return;
+        }
+      }
       active.markEnded();
-    } else if (payload.kind === 'error') {
+      return;
+    }
+    if (payload.kind === 'error') {
+      if (streamId && streamId !== this.activeStreamId) {
+        this.ignoredStreams.delete(streamId);
+        return;
+      }
       active.fail(`Browser stream error: ${payload.error}`);
     }
+  }
+
+  retireStreams() {
+    if (this.activeStreamId) this.retiredStreams.add(this.activeStreamId);
+    for (const streamId of this.ignoredStreams) this.retiredStreams.add(streamId);
+    this.ignoredStreams.clear();
+    this.activeStreamId = null;
+    this.followedHasOutput = false;
+    if (this.retiredStreams.size > 500) this.retiredStreams.clear();
   }
 
   async goto() {
@@ -283,6 +344,7 @@ class PlaygroundWorker {
     this.active = accumulator;
     this.activeStreamId = null;
     this.ignoredStreams.clear();
+    this.followedHasOutput = false;
     this.pendingBody = upstreamBody;
     this.lastHttpError = null;
     try {
@@ -309,6 +371,7 @@ class PlaygroundWorker {
       throw error;
     } finally {
       this.pendingBody = null;
+      this.retireStreams();
       this.active = null;
       this.busy = false;
     }

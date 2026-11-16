@@ -230,8 +230,66 @@ class StreamAccumulator {
   getFinishReason() {
     if (this.getToolCalls().length > 0) return 'tool_calls';
     if (this.aggregate.finishReason) return this.aggregate.finishReason;
+    if (this.hasOutput()) return 'length';
     return 'stop';
   }
 }
 
-module.exports = { StreamAccumulator };
+class SseRelay {
+  constructor(write) {
+    this.write = write;
+    this.buffer = '';
+  }
+
+  push(text) {
+    if (!text) return;
+    this.buffer += text;
+    for (;;) {
+      const match = /\r?\n\r?\n/.exec(this.buffer);
+      if (!match) break;
+      const end = match.index + match[0].length;
+      const event = this.buffer.slice(0, end);
+      this.buffer = this.buffer.slice(end);
+      this.handleEvent(event);
+    }
+  }
+
+  handleEvent(event) {
+    const match = /^data:[ \t]?(.*)$/m.exec(event);
+    if (!match) {
+      this.write(event);
+      return;
+    }
+    const payload = match[1].trim();
+    if (payload === '[DONE]') return;
+    let json;
+    try {
+      json = JSON.parse(payload);
+    } catch {
+      this.write(event);
+      return;
+    }
+    let changed = false;
+    if (json.usage) {
+      delete json.usage;
+      changed = true;
+    }
+    if (Array.isArray(json.choices)) {
+      for (const choice of json.choices) {
+        if (choice && choice.finish_reason != null) {
+          choice.finish_reason = null;
+          changed = true;
+        }
+      }
+    }
+    this.write(changed ? `data: ${JSON.stringify(json)}\n\n` : event);
+  }
+
+  flush() {
+    if (!this.buffer) return;
+    this.write(this.buffer);
+    this.buffer = '';
+  }
+}
+
+module.exports = { SseRelay, StreamAccumulator };

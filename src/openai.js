@@ -103,9 +103,9 @@ function normalizeMessages(messages, options = {}) {
   }
   const conciseInstructions = [
     'Answer in the user\'s language, defaulting to Spanish for Spanish prompts.',
-    'Be precise, direct, and concise. Usually use at most three short points.',
+    'Be precise and direct. Prefer complete, correct answers over brevity.',
     'Do not repeat the request or add unnecessary introductions, summaries, or offers.',
-    'For coding tasks, take action and verify the result. Keep explanations short, but never truncate requested files or code.',
+    'For coding tasks, take action and verify the result. Never truncate or omit requested files, code, commands, or explanations.',
     'If information is uncertain, state the uncertainty briefly instead of guessing.',
   ].join('\n');
   const system = normalized.find(message => message.role === 'system');
@@ -154,22 +154,32 @@ function pickRequestedModel(clientBody, config) {
   return config.publicModelIds[0];
 }
 
+const DEFAULT_UPSTREAM_MAX_TOKENS = 65536;
+
+function resolveMaxTokens(clientBody, config) {
+  const requested = Number(clientBody.max_completion_tokens ?? clientBody.max_tokens);
+  const hasRequested = Number.isFinite(requested) && requested > 0;
+  const cap = Number.isFinite(config.maxTokens) && config.maxTokens > 0 ? config.maxTokens : 0;
+  if (hasRequested) {
+    const value = Math.floor(requested);
+    if (cap > 0 && value > cap) return { value: cap, clamped: true };
+    return { value, clamped: false };
+  }
+  if (cap > 0) return { value: cap, clamped: false };
+  return { value: DEFAULT_UPSTREAM_MAX_TOKENS, clamped: false };
+}
+
 function buildUpstreamBody(clientBody, config) {
   const messages = normalizeMessages(clientBody.messages, config);
   const tools = normalizeTools(clientBody.tools);
-  const requestedMax = Number(clientBody.max_completion_tokens ?? clientBody.max_tokens);
-  let maxTokens = Number.isFinite(requestedMax) && requestedMax > 0
-    ? Math.floor(requestedMax)
-    : config.maxTokens;
-  const clamped = maxTokens > config.maxTokens;
-  if (clamped) maxTokens = config.maxTokens;
+  const maxTokens = resolveMaxTokens(clientBody, config);
 
   const body = {
     reasoning_effort: normalizeReasoningEffort(clientBody.reasoning_effort, config.reasoningEffort),
     stream: true,
     model: config.upstreamModel,
     seed: Number.isFinite(Number(clientBody.seed)) ? Number(clientBody.seed) : 0,
-    max_tokens: maxTokens,
+    max_tokens: maxTokens.value,
     messages,
     stream_options: { include_usage: true, continuous_usage_stats: true },
   };
@@ -198,10 +208,49 @@ function buildUpstreamBody(clientBody, config) {
     meta: {
       messages: messages.length,
       tools: tools ? tools.length : 0,
-      maxTokens,
-      clamped,
+      maxTokens: maxTokens.value,
+      clamped: maxTokens.clamped,
     },
   };
+}
+
+function buildContinuationBody(body, content, config) {
+  const messages = Array.isArray(body.messages) ? body.messages.slice() : [];
+  const partial = typeof content === 'string' ? content : '';
+  if (partial) messages.push({ role: 'assistant', content: partial });
+  messages.push({ role: 'user', content: config.continuePrompt });
+  return { ...body, messages };
+}
+
+function mergeUsage(previous, next) {
+  if (!previous) return next || null;
+  if (!next) return previous;
+  const prompt = Math.max(previous.prompt_tokens || 0, next.prompt_tokens || 0);
+  const completion = (previous.completion_tokens || 0) + (next.completion_tokens || 0);
+  return {
+    ...previous,
+    ...next,
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+  };
+}
+
+function toChatCompletionChunk(accumulator, requestedModel) {
+  const aggregate = accumulator.aggregate;
+  const chunk = {
+    id: aggregate.id || `chatcmpl-kimi-${Date.now()}${randomId()}`,
+    object: 'chat.completion.chunk',
+    created: aggregate.created || Math.floor(Date.now() / 1000),
+    model: requestedModel,
+    choices: [{
+      index: 0,
+      delta: {},
+      finish_reason: accumulator.getFinishReason(),
+    }],
+  };
+  if (aggregate.usage) chunk.usage = aggregate.usage;
+  return chunk;
 }
 
 function toChatCompletion(accumulator, requestedModel) {
@@ -235,9 +284,12 @@ function errorPayload(message, type = 'bridge_error', code = null) {
 
 module.exports = {
   HttpError,
+  buildContinuationBody,
   buildUpstreamBody,
   errorPayload,
+  mergeUsage,
   normalizeMessages,
   normalizeTools,
   toChatCompletion,
+  toChatCompletionChunk,
 };
