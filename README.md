@@ -1,20 +1,30 @@
 # Kimi Local Bridge
 
-Turn NVIDIA Build's Kimi K3.1 Pro into a local coding agent for OpenCode: real-time streaming, native tool calls, file editing, shell execution, and browser automation through Playwright. No NVIDIA API key required.
+Transform Kimi K3.1 Pro—via NVIDIA Build, using a free and unlimited API—into a local programming agent for OpenCode. It features real-time streaming, native tool calls, file editing, terminal command execution, and browser automation via Playwright. No NVIDIA API key is required.
 
-> **Unofficial project.** This bridge is not affiliated with or endorsed by NVIDIA, Moonshot AI, or OpenCode. It relies on the NVIDIA Build playground's browser behavior, which may change. Review NVIDIA's terms before using it. No guaranteed service availability or rate limits are implied.
+> **Unofficial project.** This bridge is not affiliated with or endorsed by NVIDIA, Moonshot AI, or OpenCode. It provides a way to use Kimi K3.1 Pro without needing an API—simply connect it via OpenCode and start using it.
 
 ## Why Kimi Local Bridge?
 
-- **A real coding agent:** connect Kimi to OpenCode and let it read, write, and edit files and run commands through OpenCode's tools, subject to your permissions.
-- **Real-time SSE streaming:** forwards the playground's actual token stream instead of scraping the final DOM.
-- **Native function calling:** supports tools, tool results, parallel tool calls, and multi-turn conversations.
-- **Browser-session aware:** uses your interactive NVIDIA Build login and captcha; it does not bypass them.
-- **Local and private by default:** listens on `127.0.0.1` only. Your prompts go to NVIDIA through the playground.
-- **Two independent browser tabs:** allows concurrent requests, with queueing, retries, graceful aborts, and automatic browser recovery.
-- **OpenAI-compatible API:** works with OpenCode and other OpenAI-compatible chat-completion clients.
-- **Optional Obsidian memory:** stores project conversations, decisions, preferences, and next steps as linked Markdown notes.
-- **Concise by default:** prioritizes precise, direct answers and verified coding actions without truncating requested files.
+<img width="1032" height="594" alt="Captura de pantalla 2026-11-16 a la(s) 09 58 36" src="https://github.com/user-attachments/assets/e5008ba9-5b1f-4e86-a64b-5c0194d70396" />
+
+# NVIDIA Kimi K3 OpenCode Bridge
+
+NVIDIA currently offers free access to **Kimi K3** exclusively through its web Playground, without official API key generation to connect it to external tools. This project acts as a local bridge that exposes the NVIDIA Playground as an OpenAI-compatible API—allowing you to connect Kimi K3 directly to **OpenCode** (and other coding agents) without needing an API key.
+
+## Key Features
+
+* **Real coding agent:** Connect Kimi to OpenCode and let it read, write, and edit files and run commands through OpenCode's tools, subject to your permissions.
+* **Real-time SSE streaming:** Forwards the playground's live token stream directly instead of scraping the final DOM.
+* **Native function calling:** Supports tools, tool results, parallel tool calls, and multi-turn conversations.
+* **Browser-session aware:** Uses your interactive NVIDIA Build login and captcha; it does not bypass them.
+* **Local and private by default:** Listens on `127.0.0.1` only. Your prompts go directly to NVIDIA through your browser session.
+* **Two independent browser tabs:** Allows concurrent requests with queuing, retries, graceful aborts, and automatic browser recovery.
+* **OpenAI-compatible API:** Works out of the box with OpenCode and any OpenAI-compatible chat-completion client.
+* **Optional Obsidian memory:** Stores project conversations, decisions, preferences, and next steps as linked Markdown notes.
+* **Concise by default:** Prioritizes precise, direct answers and verified coding actions without truncating requested files.
+- 
+
 
 ## How it works
 
