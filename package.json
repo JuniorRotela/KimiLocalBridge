@@ -1,0 +1,19 @@
+{
+  "name": "kimi-local-bridge",
+  "version": "2.0.0",
+  "description": "Turn NVIDIA Build's Kimi K3.1 Pro into a local coding agent for OpenCode with real-time streaming and native tool calls",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "setup:memory": "node scripts/setup-memory.js",
+    "test": "node --test",
+    "check": "node --check index.js && node --check src/config.js && node --check src/openai.js && node --check src/playground.js && node --check src/sse.js && node --check src/memory.js && node --check .opencode/plugins/kimi-memory.js && node --check scripts/setup-memory.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.42.0"
+  }
+}

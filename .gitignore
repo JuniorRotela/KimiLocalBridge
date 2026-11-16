@@ -1,0 +1,10 @@
+node_modules/
+nvidia-profile/
+*.log
+.env
+.DS_Store
+memory/Home.md
+memory/Index.md
+memory/Daily.md
+memory/notes/
+memory/sessions/
